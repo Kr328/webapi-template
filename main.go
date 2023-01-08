@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"text/template"
 )
 
@@ -14,7 +17,7 @@ var whitelist = map[string]bool{
 	"gist.githubusercontent.com": true,
 }
 
-var functions = map[string]interface{}{
+var functions = template.FuncMap{
 	"encodeUrl": func(text string) string {
 		return url.QueryEscape(text)
 	},
@@ -174,13 +177,54 @@ func main() {
 			values[k] = v[len(v)-1]
 		}
 
+		rendered := bytes.NewBuffer(nil)
+
+		err = executor.Execute(rendered, values)
+		if err != nil {
+			http.Error(writer, "Render template: "+err.Error(), http.StatusBadRequest)
+
+			return
+		}
+
+		attributes := map[string]string{}
+
+		lines := bytes.Split(rendered.Bytes(), []byte{'\n'})
+		for _, line := range lines {
+			if bytes.HasPrefix(line, []byte("# Attribute: ")) {
+				kv := bytes.SplitN(line[13:], []byte("="), 2)
+				if len(kv) != 2 {
+					continue
+				}
+
+				attributes[strings.TrimSpace(string(kv[0]))] = strings.TrimSpace(string(kv[1]))
+			} else {
+				break
+			}
+		}
+
+		userInfo, ok := attributes["userinfo-url"]
+		if ok {
+			resp, err := http.Head(userInfo)
+			if err == nil {
+				info := resp.Header.Get("Subscription-Userinfo")
+				if info != "" {
+					writer.Header().Add("Subscription-Userinfo", info)
+				}
+			}
+		}
+
+		filename, ok := attributes["filename"]
+		if ok {
+			mediaType := mime.FormatMediaType("attachment", map[string]string{"filename": filename})
+
+			writer.Header().Add("Content-Disposition", mediaType)
+		}
+
 		writer.Header().Add("Content-Type", "text/plain")
 		writer.WriteHeader(200)
 
-		err = executor.Execute(writer, values)
+		_, err = io.Copy(writer, rendered)
 		if err != nil {
-			http.Error(writer, "Execute template: "+err.Error(), http.StatusForbidden)
-
 			return
 		}
 	})
