@@ -1,3 +1,3 @@
 module webapi-template
 
-go 1.18
+go 1.19
